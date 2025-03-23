@@ -9,7 +9,7 @@ from protomotions.agents.ppo.model import PPOModel
 from protomotions.agents.common.transformer import Transformer
 from protomotions.agents.masked_mimic.model import VaeDeterministicOutputModel
 from protomotions.utils import config_utils  # This registers the resolvers
-from poselib.poselib.skeleton.skeleton3d import SkeletonMotion, SkeletonTree
+from poselib.poselib.skeleton.skeleton3d import SkeletonMotion, SkeletonTree, SkeletonState
 
 def summarize_tree(d):
     if hasattr(d, "shape"):
@@ -205,7 +205,7 @@ def load_motion_tracker(checkpoint_path: str, device: str = "cuda"):
     """
     # Load config and checkpoint
     config = OmegaConf.load(Path(checkpoint_path).parent / "config.yaml")
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
     
     # Create model
     model = PPOModel(config.agent.config.model.config)
@@ -254,12 +254,12 @@ def get_next_action(model, current_pose, future_poses, heightmap, device="cuda")
 
 def visualize_pose(motion: SkeletonMotion, frame_idx: int, action=None, ax=None):
     """
-    Visualize a single pose frame with optional angular velocity vectors
+    Visualize a single pose frame with optional target positions
     
     Args:
         motion: SkeletonMotion object
         frame_idx: Frame index to visualize
-        action: Optional action vector [69] showing angular velocity targets (excluding root)
+        action: Optional action vector [69] showing target joint angles (excluding root)
         ax: Optional matplotlib axis
     """
     if ax is None:
@@ -283,52 +283,61 @@ def visualize_pose(motion: SkeletonMotion, frame_idx: int, action=None, ax=None)
                    [start_pos[1], end_pos[1]], 
                    [start_pos[2], end_pos[2]], 'r-', linewidth=2)
     
-    # If action is provided, show angular velocity vectors
+    # If action is provided, show target positions
     if action is not None:
-        # Reshape action into [23, 3] for angular velocities (excluding root)
-        angular_vels = action.reshape(-1, 3)
+        # Get current local rotations and root translation
+        current_local_rot = motion.local_rotation[frame_idx]  # [24, 4]
+        current_root_trans = motion.root_translation[frame_idx]  # [3]
         
-        # Scale factor for visualization (adjust based on magnitude)
-        scale = 0.3
+        # Scale actions based on joint type
+        # Shoulders have wider range (-720° to 720°) vs others (-180° to 180°)
+        scaled_action = action.clone()
+        shoulder_indices = [(14,17), (19,22)]  # L/R Shoulder indices in the action vector
+        for start_idx, end_idx in shoulder_indices:
+            scaled_action[start_idx:end_idx] *= 0.25  # Reduce shoulder action magnitude
         
-        # Draw angular velocity vectors for each joint
-        for joint_idx in range(1, len(positions)):  # Skip root
-            joint_pos = positions[joint_idx]
-            ang_vel = angular_vels[joint_idx-1] * scale
-            
-            # Only draw arrows if angular velocity magnitude is significant
-            if torch.norm(ang_vel) > 0.01:
-                # Draw arrow showing rotation axis and magnitude
-                ax.quiver(joint_pos[0], joint_pos[1], joint_pos[2],
-                         ang_vel[0], ang_vel[1], ang_vel[2],
-                         color='g', alpha=0.7, arrow_length_ratio=0.2,
-                         label='Angular Velocity' if joint_idx == 1 else None)
-                
-                # Optionally, draw a small arc to indicate rotation
-                # (this is approximate and just for visualization)
-                theta = torch.norm(ang_vel)
-                if theta > 0:
-                    # Create points for an arc
-                    t = torch.linspace(0, theta, 20)
-                    radius = 0.05
-                    axis = ang_vel / theta
-                    
-                    # Create a basis for the rotation plane
-                    if abs(axis[2]) < 0.9:
-                        basis_x = torch.tensor([0., 0., 1.])
-                    else:
-                        basis_x = torch.tensor([1., 0., 0.])
-                    basis_y = torch.cross(axis, basis_x)
-                    basis_y = basis_y / torch.norm(basis_y)
-                    basis_x = torch.cross(basis_y, axis)
-                    
-                    # Create arc points
-                    arc_points = joint_pos + radius * (torch.cos(t)[:, None] * basis_x + 
-                                                     torch.sin(t)[:, None] * basis_y)
-                    
-                    # Plot arc
-                    ax.plot(arc_points[:, 0], arc_points[:, 1], arc_points[:, 2],
-                           'g:', alpha=0.5, linewidth=1)
+        # Convert action (target angles) to local rotations
+        target_local_rot = current_local_rot.clone()
+        action_angles = scaled_action.reshape(-1, 3)  # [23, 3]
+        
+        # Create target pose state directly using SkeletonState
+        target_state = SkeletonState.from_rotation_and_root_translation(
+            skeleton_tree=motion.skeleton_tree,
+            r=target_local_rot,  # Keep current rotations
+            t=current_root_trans,  # Keep current root position
+            is_local=True
+        )
+        
+        # Apply scaled actions as relative rotations
+        for i in range(23):  # Skip root
+            angle_norm = torch.norm(action_angles[i])
+            if angle_norm > 0.01:  # Only update if significant change
+                # Convert axis-angle to quaternion
+                axis = action_angles[i] / angle_norm
+                half_angle = angle_norm / 2
+                sin_half = torch.sin(half_angle)
+                target_quat = torch.tensor([
+                    axis[0] * sin_half,
+                    axis[1] * sin_half,
+                    axis[2] * sin_half,
+                    torch.cos(half_angle)
+                ])
+                # Update the joint's rotation in the target state
+                target_state.local_rotation[i+1] = target_quat
+        
+        # Get target global positions
+        target_positions = target_state.global_translation  # [24, 3]
+        
+        # Draw target positions
+        ax.scatter(target_positions[:, 0], target_positions[:, 1], target_positions[:, 2], 
+                  c='g', marker='o', s=50, alpha=0.5, label='Target Position')
+        
+        # Draw lines from current to target positions
+        for i in range(1, len(positions)):  # Skip root
+            ax.plot([positions[i, 0], target_positions[i, 0]],
+                   [positions[i, 1], target_positions[i, 1]],
+                   [positions[i, 2], target_positions[i, 2]],
+                   'g--', alpha=0.5, linewidth=1)
     
     # Set equal aspect ratio and labels
     ax.set_xlabel('X', labelpad=10)
@@ -395,7 +404,7 @@ if __name__ == "__main__":
     
     # Load motion data
     motion = load_motion_data("data/motions/smpl_humanoid_walk.npy")
-    
+    print(summarize_tree(motion.skeleton_tree))
     # Create flat heightmap (no terrain features)
     batch_size = 1
     heightmap = torch.zeros(batch_size, 256).to(device)  # [batch_size, terrain_obs_num_samples]
@@ -403,7 +412,7 @@ if __name__ == "__main__":
     # Process frames and collect actions
     actions = []
     frame_indices = []
-    for start_idx in range(0, min(100, len(motion.rotation)), 10):
+    for start_idx in range(0, min(1000, len(motion.rotation)), 10):
         print(f"\nProcessing frame {start_idx}")
         
         # Get motion slice
@@ -415,7 +424,7 @@ if __name__ == "__main__":
         print(f"Current pose range: [{current_pose.min():.3f}, {current_pose.max():.3f}]")
         
         # Get action
-        action = get_next_action(model, current_pose, future_poses, heightmap)
+        action = get_next_action(model, current_pose, future_poses, heightmap, device=device)
         print(f"Action shape: {action.shape}")
         print(f"Action range: [{action.min():.3f}, {action.max():.3f}]")
         actions.append(action)
@@ -423,17 +432,78 @@ if __name__ == "__main__":
     
     # Create a grid of frames with actions
     print("\nCreating frame grid visualization with actions...")
-    fig = plt.figure(figsize=(20, 10))
+    fig = plt.figure(figsize=(20, 15))  # Made figure taller to accommodate action plot
     
     # Select 6 frames evenly spaced through the processed frames
     selected_indices = np.linspace(0, len(frame_indices)-1, 6, dtype=int)
     
+    # Create subplot grid: 3 rows (2 for poses, 1 for action plot) x 3 columns
+    gs = plt.GridSpec(3, 3)
+    
     for i, idx in enumerate(selected_indices, 1):
-        ax = fig.add_subplot(2, 3, i, projection='3d')
+        row = (i-1) // 3
+        col = (i-1) % 3
+        ax = fig.add_subplot(gs[row, col], projection='3d')
         frame_idx = frame_indices[idx]
         action = actions[idx].cpu().squeeze()  # Get corresponding action
         visualize_pose(motion, frame_idx, action, ax)
         ax.set_title(f'Frame {frame_idx}\nAction Magnitude: {torch.norm(action):.2f}')
+    
+    # Add action trajectory plot in bottom row
+    ax_actions = fig.add_subplot(gs[2, :])
+    actions_array = torch.stack(actions).cpu().numpy()
+    
+    # Plot a subset of joints for clarity
+    joint_indices = [
+        (0, 3),    # Left Hip
+        (12, 15),  # Right Hip
+        (24, 27),  # Torso
+        (39, 42),  # Head
+        (42, 45),  # Left Shoulder
+        (60, 63),  # Right Shoulder
+    ]  # Example joint indices (adjust based on your needs)
+    
+    joint_names = [
+        "Left Hip", "Right Hip", "Torso",
+        "Head", "Left Shoulder", "Right Shoulder"
+    ]
+    
+    colors = ['b', 'r', 'g', 'c', 'm', 'y']
+    
+    # Get current angles for comparison
+    current_angles = []
+    for frame_idx in frame_indices:
+        # Extract Euler angles from current rotations
+        euler_angles = []
+        for joint_idx in range(1, 24):  # Skip root
+            rot_quat = motion.local_rotation[frame_idx, joint_idx]
+            # Convert quaternion to axis-angle
+            angle = 2 * torch.acos(rot_quat[3])  # w component
+            if angle > 0.01:
+                axis = rot_quat[:3] / torch.sin(angle/2)
+                euler_angles.extend(axis * angle)
+            else:
+                euler_angles.extend([0, 0, 0])
+        current_angles.append(euler_angles)
+    current_angles = np.array(current_angles)
+    
+    # Plot both target and current angles
+    for (start_idx, end_idx), name, color in zip(joint_indices, joint_names, colors):
+        for j in range(start_idx, end_idx):
+            # Plot target angles
+            ax_actions.plot(frame_indices, actions_array[:, 0, j], 
+                          alpha=0.7, color=color, linestyle='-',
+                          label=f'{name} Target (axis {j-start_idx})' if j == start_idx else None)
+            # Plot current angles
+            ax_actions.plot(frame_indices, current_angles[:, j], 
+                          alpha=0.3, color=color, linestyle='--',
+                          label=f'{name} Current (axis {j-start_idx})' if j == start_idx else None)
+    
+    ax_actions.set_xlabel('Frame')
+    ax_actions.set_ylabel('Angle (radians)')
+    ax_actions.set_title('Joint Angles Over Time (Solid: Target, Dashed: Current)')
+    ax_actions.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax_actions.grid(True)
     
     plt.tight_layout()
     plt.savefig('motion_frames_with_actions_grid.png', dpi=150, bbox_inches='tight')
@@ -455,7 +525,7 @@ if __name__ == "__main__":
         return ax,
     
     # Create animation with more frames and smoother playback
-    num_frames = min(200, len(motion.rotation))
+    num_frames = min(1000, len(motion.rotation))
     anim = animation.FuncAnimation(fig, update, frames=num_frames,
                                  interval=33,  # ~30 fps
                                  blit=False)
