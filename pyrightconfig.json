@@ -1,0 +1,12 @@
+{
+  "reportUnknownMemberType": false,
+  "reportUnknownVariableType": false,
+  "reportUnknownParameterType": false,
+  "reportUnknownArgumentType": false,
+  "reportMissingImports": false,
+  "reportUnknownVariableType": false,
+  "reportMissingParameterType": false,
+  "reportMissingTypeStubs": false,
+  "reportMissingTypeArgument": false,
+  "reportMissingTypeAnnotation": false
+}

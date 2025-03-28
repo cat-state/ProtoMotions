@@ -56,6 +56,7 @@ class MLP(nn.Module):
     def forward(self, input_dict, *args, **kwargs):
         if isinstance(input_dict, torch.Tensor):
             return self.mlp(input_dict)
+        print(f"{self.config.obs_key=}")
         return self.mlp(input_dict[self.config.obs_key])
 
 
@@ -65,6 +66,7 @@ class MLP_WithNorm(NormObsBase):
         self.mlp = build_mlp(self.config, num_in, num_out)
 
     def forward(self, input_dict, return_norm_obs=False):
+        print(f"{self.config.obs_key=}")
         obs = super().forward(input_dict[self.config.obs_key])
         outs: Tensor = self.mlp(obs)
 

@@ -226,8 +226,8 @@ class Mimic(BaseEnv):
         self,
         env_ids,
         offset=0,
-        rigid_body_pos: torch.tensor = None,
-        requires_scene: torch.tensor = None,
+        rigid_body_pos: torch.Tensor | None = None,
+        requires_scene: torch.Tensor | None = None,
     ):
         """
         Get the offset of the respawn position relative to the current position.
