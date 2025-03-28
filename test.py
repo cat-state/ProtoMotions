@@ -373,8 +373,6 @@ def visualize_pose(motion: SkeletonMotion, frame_idx: int, action=None, ax=None,
         pd_target = pd_offset + pd_scale * action
         
         # Convert target angles to local rotations
-        print(pd_target.shape)
-        print(dof_offsets)
         target_local_rot = dof_to_local(pd_target, dof_offsets[:-1], w_last=True)
         
         # Create target pose state directly using SkeletonState
@@ -497,7 +495,7 @@ if __name__ == "__main__":
     dt = 1.0/30.0
     length = motion.get_motion_length(torch.tensor([0]))
     num_frames = int(torch.floor(length / dt).item())
-    for start_idx in range(0, num_frames, 10):
+    for start_idx in range(0, num_frames, 1):
         print(f"\nProcessing frame {start_idx}")
         
         time_offsets = torch.arange(1, 15 + 1) * dt
@@ -622,6 +620,7 @@ if __name__ == "__main__":
     for (start_idx, end_idx), name, color in zip(joint_indices, joint_names, colors):
         for j in range(start_idx, end_idx):
             # Convert action to target angles using PD scale
+            print(f"{actions_array.shape=}")
             pd_targets = pd_offset[j] + pd_scale[j] * actions_array[:, 0, j]
             
             # Plot target angles
