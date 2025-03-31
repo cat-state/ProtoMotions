@@ -370,9 +370,7 @@ def visualize_pose(motion: SkeletonMotion, frame_idx: int, action=None, ax=None,
         )
         
         # Convert action to target angles
-        pd_target = pd_offset + pd_scale * action
-        
-        # Convert target angles to local rotations
+        pd_target = pd_offset + pd_scale * action        # Convert target angles to local rotations
         target_local_rot = dof_to_local(pd_target, dof_offsets[:-1], w_last=True)
         
         # Create target pose state directly using SkeletonState
@@ -482,6 +480,7 @@ if __name__ == "__main__":
     model, motion_tracker_cfg = load_motion_tracker("data/pretrained_models/motion_tracker/smpl/last.ckpt", device)
     robot_cfg = motion_tracker_cfg.robot
     motion = load_motion_data("data/motions/smpl_humanoid_walk.npy", robot_cfg)
+    # motion = load_motion_data("data/motions/smpl_humanoid_sit_armchair.npy", robot_cfg)
     
     # Create flat heightmap (no terrain features)
     batch_size = 1
