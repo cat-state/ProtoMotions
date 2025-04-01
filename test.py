@@ -235,10 +235,11 @@ def parse_joint_info(xml_file):
                     'range': torch.tensor(angle_range),
                     'range_radians': torch.tensor([np.deg2rad(angle_range[0]), np.deg2rad(angle_range[1])])
                 }
+                print(f"{name=}:{joint_info[name]=}")
                 joint_order.append(name)
             except (ValueError, IndexError) as e:
                 print(f"Warning: Failed to parse joint {name}: {e}")
-                continue
+                raise e
         
         if not joint_info:
             raise ValueError("No valid joints found in XML file")
@@ -418,7 +419,7 @@ def visualize_pose(motion: SkeletonMotion, frame_idx: int, action=None, ax=None,
     ax.set_zlim(center[2] - max_range/2 - padding, center[2] + max_range/2 + padding)
     
     # Set a good viewing angle
-    ax.view_init(elev=15, azim=45)
+    ax.view_init(elev=0, azim=90)
     
     # Add a ground plane
     min_x, max_x = ax.get_xlim()
@@ -473,9 +474,18 @@ if __name__ == "__main__":
     if joint_info is None:
         print("Failed to parse joint info from XML file. Exiting.")
         sys.exit(1)
-    
     print(f"Successfully parsed {len(joint_info)} joints from XML")
     
+    dof_offsets = [i*3 for i in range(24)]
+    dof_limits_lower, dof_limits_upper = list(zip(*[info["range_radians"].numpy().tolist() for info in joint_info.values()]))
+    dof_limits_lower, dof_limits_upper = torch.tensor(dof_limits_lower), torch.tensor(dof_limits_upper)
+
+    print(dof_limits_lower)
+    print(dof_limits_upper)
+    pd_offset, pd_scale = build_pd_action_offset_scale(dof_offsets, dof_limits_lower, dof_limits_upper, device)
+    print(pd_offset)
+    print(pd_scale)
+
     # Load model
     model, motion_tracker_cfg = load_motion_tracker("data/pretrained_models/motion_tracker/smpl/last.ckpt", device)
     robot_cfg = motion_tracker_cfg.robot
@@ -494,13 +504,13 @@ if __name__ == "__main__":
     dt = 1.0/30.0
     length = motion.get_motion_length(torch.tensor([0]))
     num_frames = int(torch.floor(length / dt).item())
-    for start_idx in range(0, num_frames, 1):
-        print(f"\nProcessing frame {start_idx}")
+    import tqdm
+    for start_idx in tqdm.trange(0, num_frames, 1):
         
-        time_offsets = torch.arange(1, 15 + 1) * dt
+        time_offsets = torch.arange(0, 15 + 1) * dt
         robot_state = motion.get_motion_state(
             torch.tensor([0 for _ in range(16)]), 
-            torch.tensor([dt * (start_idx + i) for i in range(16)])
+            start_idx * dt + time_offsets
         )
         assert robot_state.rigid_body_pos is not None 
         assert robot_state.rigid_body_rot is not None   
@@ -517,25 +527,26 @@ if __name__ == "__main__":
             w_last=True
         )
         target_obs = build_max_coords_target_poses_future_rel(
-            cur_gt=robot_state.rigid_body_pos[:1],
+            cur_gt=robot_state.rigid_body_pos[:1] - torch.tensor([[0.0, 0.0, 0.0]]),
             cur_gr=robot_state.rigid_body_rot[:1],
-            flat_target_pos=robot_state.rigid_body_pos[1:],
+            flat_target_pos=robot_state.rigid_body_pos[1:]  - torch.tensor([[0.0, 0.0, 0.0]]),
             flat_target_rot=robot_state.rigid_body_rot[1:],
             num_envs=1,
             num_future_steps=15,
             w_last=True
         ).cuda()
+        print(target_obs.shape)
         target_obs = target_obs.reshape(1, 15, -1)
-        target_obs = torch.cat([target_obs, time_offsets[None, :, None].cuda()], dim=-1)
+        print(time_offsets)
+        target_obs = torch.cat([target_obs, time_offsets[None, 1:, None].cuda()], dim=-1)
 
+        print(self_obs.shape)
         inputs = {
-            "self_obs": self_obs.cuda()[:1],  # [batch_size, obs_size]
+            "self_obs": self_obs.cuda()[None, :1],  # [timesteps, obs_size]
             "mimic_target_poses": target_obs,  # [batch_size, num_future_steps, obs_size_with_time]
             "terrain": heightmap  # [batch_size, num_samples]
         }
         action = model.act(inputs, mean=True)
-        print(f"Action shape: {action.shape}")
-        print(f"Action range: [{action.min():.3f}, {action.max():.3f}]")
         actions.append(action)
         frame_indices.append(start_idx)
     
@@ -609,6 +620,8 @@ if __name__ == "__main__":
     for name, info in joint_info.items():
         dof_limits_lower[joint_idx] = info['range_radians'][0]
         dof_limits_upper[joint_idx] = info['range_radians'][1]
+        if info['range_radians'][0] > 3.142:
+            print(name, info)
         joint_idx += 1
 
     pd_offset, pd_scale = build_pd_action_offset_scale(
@@ -619,7 +632,6 @@ if __name__ == "__main__":
     for (start_idx, end_idx), name, color in zip(joint_indices, joint_names, colors):
         for j in range(start_idx, end_idx):
             # Convert action to target angles using PD scale
-            print(f"{actions_array.shape=}")
             pd_targets = pd_offset[j] + pd_scale[j] * actions_array[:, 0, j]
             
             # Plot target angles
@@ -639,14 +651,17 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     plt.savefig('motion_frames_with_actions_grid.png', dpi=150, bbox_inches='tight')
+    plt.show()
     plt.close()
     print("Saved frame grid with actions as 'motion_frames_with_actions_grid.png'")
     
+    raise SystemExit
     # Create animation with actions
     print("\nCreating animation with actions...")
     fig = plt.figure(figsize=(12, 12))
     ax = fig.add_subplot(111, projection='3d')
-    
+    ax.view_init(elev=30, azim=0, roll=0)
+
     def update(frame):
         ax.clear()
         # Find closest processed frame and its action
